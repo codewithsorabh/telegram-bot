@@ -1,0 +1,10 @@
+{
+  "include": [
+    "bot",
+    "userbot"
+  ],
+  "extraPaths": [
+    "./bot",
+    "./userbot"
+  ]
+}

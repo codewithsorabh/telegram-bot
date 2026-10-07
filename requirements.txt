@@ -1,0 +1,13 @@
+python-dotenv
+psycopg2-binary
+redis
+telethon
+cryptg
+pyopenssl
+python-telegram-bot==22.8
+apscheduler>=3.10.0
+cryptography
+
+# Build tools
+pyinstaller
+pyarmor
