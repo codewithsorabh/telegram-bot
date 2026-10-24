@@ -259,14 +259,15 @@ async def _show_filtered_users(
         category_title = "⚠️ Expired Sessions"
     elif mode == "forward_true":
         users = [
-            u for u in all_u if u.get("forwarding_enabled", u.get("is_forward", True))
+            u for u in all_u
+            if (u.get("forwarding_enabled") if u.get("forwarding_enabled") is not None else u.get("is_forward", True))
         ]
         category_title = "▶️ Active Forwarding Accounts"
     elif mode == "forward_false":
         users = [
             u
             for u in all_u
-            if not u.get("forwarding_enabled", u.get("is_forward", True))
+            if not (u.get("forwarding_enabled") if u.get("forwarding_enabled") is not None else u.get("is_forward", True))
         ]
         category_title = "⏸️ Stopped Forwarding Accounts"
     elif mode == "topic_none":

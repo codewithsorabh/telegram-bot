@@ -1,10 +1,14 @@
 {
+  "venvPath": ".",
+  "venv": ".venv",
   "include": [
     "bot",
     "userbot"
   ],
   "extraPaths": [
+    ".",
     "./bot",
     "./userbot"
-  ]
+  ],
+  "typeCheckingMode": "off"
 }

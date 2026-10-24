@@ -108,7 +108,10 @@ def USER_DETAIL_MSG(u: dict) -> str:
         else "<i>No Plan Selected (Unlimited)</i>"
     )
     phone = u.get("phone_number") or u.get("phone", "—")
-    fwd_enabled = u.get("forwarding_enabled", u.get("is_forward", True))
+    fwd_val = u.get("forwarding_enabled")
+    if fwd_val is None:
+        fwd_val = u.get("is_forward")
+    fwd_enabled = True if fwd_val is None else bool(fwd_val)
     fwd_status = "▶ Running" if fwd_enabled else "⏸ Stopped"
     user_id = u.get("user_id") or u.get("added_by", "—")
     validate = (u.get("validate") or u.get("session_status") or "active").lower()

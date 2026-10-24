@@ -51,7 +51,7 @@ def bootstrap_users_table() -> None:
             plan_id              BIGINT       REFERENCES plans(id) ON DELETE SET NULL,
             plan_started_at      TIMESTAMPTZ,
             plan_expired_at      TIMESTAMPTZ,
-            forwarding_enabled   BOOLEAN      NOT NULL DEFAULT FALSE,
+            forwarding_enabled   BOOLEAN      NOT NULL DEFAULT TRUE,
             created_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
             updated_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         );
@@ -67,7 +67,7 @@ def bootstrap_users_table() -> None:
             ADD COLUMN IF NOT EXISTS plan_id              BIGINT       REFERENCES plans(id) ON DELETE SET NULL,
             ADD COLUMN IF NOT EXISTS plan_started_at      TIMESTAMPTZ,
             ADD COLUMN IF NOT EXISTS plan_expired_at      TIMESTAMPTZ,
-            ADD COLUMN IF NOT EXISTS forwarding_enabled   BOOLEAN      NOT NULL DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS forwarding_enabled   BOOLEAN      NOT NULL DEFAULT TRUE,
             ADD COLUMN IF NOT EXISTS session_status       VARCHAR(30)  NOT NULL DEFAULT 'active',
             ADD COLUMN IF NOT EXISTS session_error        TEXT,
             ADD COLUMN IF NOT EXISTS last_session_check_at TIMESTAMPTZ,
@@ -230,7 +230,7 @@ def save_telegram_user(
     session_string: str,
     topic_id: str | None = None,
     plan_id: int | None = None,
-    is_forward: bool = False,
+    is_forward: bool = True,
     channel_id: int | str | None = None,
     **kwargs,
 ) -> None:
@@ -261,7 +261,7 @@ def save_telegram_user(
                 plan_id              = EXCLUDED.plan_id,
                 plan_started_at      = CASE WHEN EXCLUDED.plan_id IS NULL THEN NULL ELSE COALESCE(telegram_users.plan_started_at, NOW()) END,
                 plan_expired_at      = CASE WHEN EXCLUDED.plan_id IS NULL THEN NULL ELSE NOW() + ((SELECT validity_days FROM plans WHERE id = EXCLUDED.plan_id) || ' days')::INTERVAL END,
-                forwarding_enabled   = EXCLUDED.forwarding_enabled,
+                forwarding_enabled   = COALESCE(telegram_users.forwarding_enabled, EXCLUDED.forwarding_enabled),
                 channel_id           = COALESCE(EXCLUDED.channel_id, telegram_users.channel_id),
                 updated_at           = NOW();
     """,
@@ -355,38 +355,23 @@ def update_user_session_status(
 ) -> dict | None:
     """
     Update session status in DB (active, banned, expired, suspended).
-    If status is banned, expired, or suspended, automatically disables forwarding.
+    Forwarding is NOT modified automatically; it is controlled exclusively via manual toggle.
     """
     cursor = get_cursor()
-    disable_fwd = status.lower() in ("banned", "expired", "suspended")
-    if disable_fwd:
-        cursor.execute(
-            """
-            UPDATE telegram_users
-            SET session_status = %s,
-                session_error = %s,
-                last_session_check_at = NOW(),
-                forwarding_enabled = FALSE,
-                updated_at = NOW()
-            WHERE id = %s;
-            """,
-            (status, error, user_id),
-        )
-    else:
-        cursor.execute(
-            """
-            UPDATE telegram_users
-            SET session_status = %s,
-                session_error = %s,
-                last_session_check_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s;
-            """,
-            (status, error, user_id),
-        )
+    cursor.execute(
+        """
+        UPDATE telegram_users
+        SET session_status = %s,
+            session_error = %s,
+            last_session_check_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s;
+        """,
+        (status, error, user_id),
+    )
     db.commit()
     cursor.close()
-    LOG.info("Updated session_status=%s for user_id=%s (forwarding_disabled=%s)", status, user_id, disable_fwd)
+    LOG.info("Updated session_status=%s for user_id=%s", status, user_id)
     return get_user_by_id(user_id)
 
 

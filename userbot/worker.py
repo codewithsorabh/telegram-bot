@@ -116,7 +116,10 @@ class AccountWorker:
         self._stop_event.set()
         if self._client:
             try:
-                await self._client.disconnect()
+                import inspect
+                dis = self._client.disconnect()
+                if inspect.isawaitable(dis):
+                    await dis
             except Exception:
                 pass
         if self._task and not self._task.done():
@@ -187,18 +190,19 @@ class AccountWorker:
                 SessionExpiredError,
             ) as exc:
                 LOG.error(
-                    "💀 Fatal session error user_id=%s: %s — stopping worker & disabling in DB",
+                    "💀 Fatal session error user_id=%s: %s — stopping worker",
                     self.uid,
                     exc,
                 )
                 self._set_redis("status", "session_error")
                 try:
-                    from models.users import update_user_forwarding
+                    from models.users import update_user_session_status
 
-                    update_user_forwarding(self.uid, False)
+                    st = "banned" if isinstance(exc, (UserDeactivatedBanError, UserDeactivatedError)) else "expired"
+                    update_user_session_status(self.uid, st, str(exc))
                 except Exception as db_exc:
                     LOG.error(
-                        "Failed to disable broken user_id=%s in DB: %s",
+                        "Failed to update session status for user_id=%s in DB: %s",
                         self.uid,
                         db_exc,
                     )
@@ -309,6 +313,10 @@ class AccountWorker:
 
     async def _get_latest_message_id(self, source_url: str) -> int | None:
         """Get the ID of the most recent message in the source channel using GetHistoryRequest."""
+        if not self._client:
+            LOG.error("❌ Worker user_id=%s — client not connected", self.uid)
+            return None
+
         try:
             from telethon.tl.functions.messages import GetHistoryRequest
 
@@ -388,6 +396,14 @@ class AccountWorker:
                     )
                     # asyncio.create_task(log_skipping(ch_id, self.uid, dest_url, next_run_str, remaining_secs))
                     return
+
+        if not self._client:
+            LOG.error("❌ Worker user_id=%s — client not connected", self.uid)
+            return
+
+        dest_entity = None
+        reply_to_topic = None
+        source_entity = None
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
@@ -508,12 +524,6 @@ class AccountWorker:
                         failure_count=attempt,
                         next_run_at=sent_time + timedelta(days=30),
                     )
-                    try:
-                        from models.users import update_user_forwarding
-                        update_user_forwarding(self.uid, False)
-                    except Exception as db_exc:
-                        LOG.error("Failed to disable banned user_id=%s in DB: %s", self.uid, db_exc)
-
                     asyncio.create_task(log_banned(ch_id, self.uid, dest_url))
                     u_obj = get_user_by_id(self.uid)
                     if u_obj:
@@ -564,46 +574,47 @@ class AccountWorker:
                         reply_to_topic,
                         dest_url,
                     )
-                    try:
-                        from utils.forward_validator import find_open_forum_topic
+                    if dest_entity is not None and source_entity is not None and self._client:
+                        try:
+                            from utils.forward_validator import find_open_forum_topic
 
-                        open_topic_id = await find_open_forum_topic(
-                            self._client, dest_entity
-                        )
-                        await _forward_validator(
-                            client=self._client,
-                            entity=dest_entity,
-                            messages=msg_id,
-                            from_peer=source_entity,
-                            reply_to=open_topic_id,
-                        )
-                        sent_time = datetime.now(timezone.utc)
-                        next_run_time = sent_time + timedelta(seconds=interval + 5)
-                        LOG.info(
-                            "✅ [%s] Forwarded msg_id=%s → %s (topic_id=%s fallback) SUCCESSFULLY",
-                            self.uid,
-                            msg_id,
-                            dest_url,
-                            open_topic_id,
-                        )
-                        upsert_state(
-                            telegram_user_id=self.uid,
-                            topic_id=topic_id,
-                            url=dest_url,
-                            last_message_id=msg_id,
-                            last_sent_at=sent_time,
-                            next_run_at=next_run_time,
-                            status="success",
-                            failure_count=0,
-                        )
-                        if url_key:
-                            mark_run(self.uid, url_key, dest_url)
-                        asyncio.create_task(
-                            log_topic_fallback(ch_id, self.uid, dest_url, open_topic_id)
-                        )
-                        return
-                    except Exception as fallback_exc:
-                        exc = fallback_exc
+                            open_topic_id = await find_open_forum_topic(
+                                self._client, dest_entity
+                            )
+                            await _forward_validator(
+                                client=self._client,
+                                entity=dest_entity,
+                                messages=msg_id,
+                                from_peer=source_entity,
+                                reply_to=open_topic_id,
+                            )
+                            sent_time = datetime.now(timezone.utc)
+                            next_run_time = sent_time + timedelta(seconds=interval + 5)
+                            LOG.info(
+                                "✅ [%s] Forwarded msg_id=%s → %s (topic_id=%s fallback) SUCCESSFULLY",
+                                self.uid,
+                                msg_id,
+                                dest_url,
+                                open_topic_id,
+                            )
+                            upsert_state(
+                                telegram_user_id=self.uid,
+                                topic_id=topic_id,
+                                url=dest_url,
+                                last_message_id=msg_id,
+                                last_sent_at=sent_time,
+                                next_run_at=next_run_time,
+                                status="success",
+                                failure_count=0,
+                            )
+                            if url_key:
+                                mark_run(self.uid, url_key, dest_url)
+                            asyncio.create_task(
+                                log_topic_fallback(ch_id, self.uid, dest_url, open_topic_id)
+                            )
+                            return
+                        except Exception as fallback_exc:
+                            exc = fallback_exc
 
                 LOG.error(
                     "⚠️ [%s] Attempt %d/%d FAILED → %s: %s",
@@ -654,7 +665,10 @@ class AccountWorker:
     async def _disconnect_client(self) -> None:
         if self._client:
             try:
-                await self._client.disconnect()
+                import inspect
+                dis = self._client.disconnect()
+                if inspect.isawaitable(dis):
+                    await dis
             except Exception:
                 pass
             self._client = None

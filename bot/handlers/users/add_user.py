@@ -17,6 +17,7 @@
 
 import asyncio
 import warnings
+from typing import Any
 
 warnings.filterwarnings(
     "ignore",
@@ -97,6 +98,8 @@ async def _edit_bubble(
     text: str,
     keyboard=None,
 ) -> None:
+    if not context.user_data:
+        return
     chat_id = context.user_data.get(_KEY_CHAT_ID)
     msg_id = context.user_data.get(_KEY_MSG_ID)
     if not chat_id or not msg_id:
@@ -125,7 +128,8 @@ async def _edit_bubble(
                 reply_markup=keyboard,
                 disable_web_page_preview=True,
             )
-            context.user_data[_KEY_MSG_ID] = sent.message_id
+            if context.user_data is not None:
+                context.user_data[_KEY_MSG_ID] = sent.message_id
             schedule_delete(context, chat_id, sent.message_id)
         except Exception:
             pass
@@ -136,13 +140,22 @@ def _auto_delete_user_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         schedule_delete(context, update.message.chat_id, update.message.message_id)
 
 
-async def _cleanup(context: ContextTypes.DEFAULT_TYPE) -> None:
-    client: TelegramClient | None = context.user_data.pop(_KEY_CLIENT, None)
+async def _safe_disconnect(client: TelegramClient | None) -> None:
     if client:
         try:
-            await client.disconnect()
+            import inspect
+            dis = client.disconnect()
+            if inspect.isawaitable(dis):
+                await dis
         except Exception:
             pass
+
+
+async def _cleanup(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.user_data is None:
+        return
+    client: TelegramClient | None = context.user_data.pop(_KEY_CLIENT, None)
+    await _safe_disconnect(client)
     for key in (
         _KEY_API_ID,
         _KEY_API_HASH,
@@ -169,10 +182,13 @@ async def cb_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     query = update.callback_query
+    if not query or context.user_data is None:
+        return ConversationHandler.END
     await query.answer()
 
-    context.user_data[_KEY_MSG_ID] = query.message.message_id
-    context.user_data[_KEY_CHAT_ID] = query.message.chat_id
+    if query.message:
+        context.user_data[_KEY_MSG_ID] = query.message.message_id
+        context.user_data[_KEY_CHAT_ID] = query.message.chat.id
 
     await _edit_bubble(context, ASK_AUTH, CANCEL_KEYBOARD())
     return STATE_API_ID
@@ -186,10 +202,12 @@ async def cb_reauth_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     query = update.callback_query
+    if not query or context.user_data is None:
+        return ConversationHandler.END
     await query.answer()
 
     try:
-        uid = int(query.data.split(":")[1])
+        uid = int(query.data.split(":")[1]) if query.data else 0
     except (IndexError, ValueError):
         await query.answer("Invalid account ID.", show_alert=True)
         return ConversationHandler.END
@@ -209,8 +227,9 @@ async def cb_reauth_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Incomplete credentials for account.", show_alert=True)
         return ConversationHandler.END
 
-    context.user_data[_KEY_MSG_ID] = query.message.message_id
-    context.user_data[_KEY_CHAT_ID] = query.message.chat_id
+    if query.message:
+        context.user_data[_KEY_MSG_ID] = query.message.message_id
+        context.user_data[_KEY_CHAT_ID] = query.message.chat.id
     context.user_data["au_reauth_uid"] = uid
     context.user_data[_KEY_API_ID] = api_id
     context.user_data[_KEY_API_HASH] = api_hash
@@ -246,7 +265,7 @@ async def cb_reauth_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>Could not send OTP for Re-Auth</b>\n\n<code>{exc}</code>\n\nNo changes saved.",
             CANCELLED_KEYBOARD_USER(),
         )
-        await client.disconnect()
+        await _safe_disconnect(client)
         await _cleanup(context)
         return ConversationHandler.END
 
@@ -261,6 +280,8 @@ async def cb_reauth_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def recv_credentials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Parse API ID, API Hash, and Phone from a single multi-line message."""
     _auto_delete_user_msg(update, context)
+    if not update.message or not update.message.text or context.user_data is None:
+        return STATE_API_ID
     lines = [l.strip() for l in update.message.text.strip().splitlines() if l.strip()]
 
     if len(lines) < 3:
@@ -316,7 +337,7 @@ async def recv_credentials(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>Could not send OTP</b>\n\n<code>{exc}</code>\n\nNo data was saved.",
             CANCELLED_KEYBOARD_USER(),
         )
-        await client.disconnect()
+        await _safe_disconnect(client)
         await _cleanup(context)
         return ConversationHandler.END
 
@@ -326,6 +347,8 @@ async def recv_credentials(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def recv_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _auto_delete_user_msg(update, context)
+    if not context.user_data:
+        return ConversationHandler.END
     raw_text = (
         update.message.text.strip() if update.message and update.message.text else ""
     )
@@ -395,7 +418,7 @@ async def recv_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ <b>Too many incorrect OTP attempts.</b>\n\nNo data was saved.",
                 CANCELLED_KEYBOARD_USER(),
             )
-            await client.disconnect()
+            await _safe_disconnect(client)
             await _cleanup(context)
             return ConversationHandler.END
 
@@ -430,10 +453,7 @@ async def recv_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>OTP verification failed.</b>\n\n<code>{exc}</code>\n\nNo data was saved.",
             CANCELLED_KEYBOARD_USER(),
         )
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)
         await _cleanup(context)
         return ConversationHandler.END
 
@@ -441,6 +461,8 @@ async def recv_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_resend_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Resend a fresh OTP code when user clicks 🔄 Resend OTP Code."""
     query = update.callback_query
+    if not query or not context.user_data:
+        return ConversationHandler.END
     await query.answer("Requesting new OTP code...")
 
     phone = context.user_data.get(_KEY_PHONE)
@@ -476,15 +498,19 @@ async def cb_resend_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>Could not resend OTP</b>\n\n<code>{exc}</code>\n\nPlease try again later.",
             CANCELLED_KEYBOARD_USER(),
         )
-        await client.disconnect()
+        await _safe_disconnect(client)
         await _cleanup(context)
         return ConversationHandler.END
 
 
 async def recv_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _auto_delete_user_msg(update, context)
+    if not update.message or not update.message.text or not context.user_data:
+        return ConversationHandler.END
     password = update.message.text.strip()
-    client: TelegramClient = context.user_data[_KEY_CLIENT]
+    client: TelegramClient | None = context.user_data.get(_KEY_CLIENT)
+    if not client:
+        return ConversationHandler.END
 
     try:
         await client.sign_in(password=password)
@@ -505,16 +531,17 @@ async def recv_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
             AUTH_FAILED + "\n\nNo data was saved.",
             CANCELLED_KEYBOARD_USER(),
         )
-        await client.disconnect()
+        await _safe_disconnect(client)
         await _cleanup(context)
         return ConversationHandler.END
 
 
 async def _finish_auth(update, context, client: TelegramClient):
     try:
-        session_string = client.session.save()
-        await client.disconnect()
-        context.user_data[_KEY_TEMP_SESS] = session_string
+        session_string = client.session.save() if client.session else ""
+        await _safe_disconnect(client)
+        if context.user_data is not None:
+            context.user_data[_KEY_TEMP_SESS] = session_string
     except Exception as exc:
         log.error("_finish_auth session save/disconnect error: %s", exc)
 
@@ -594,8 +621,10 @@ async def _finish_auth(update, context, client: TelegramClient):
 
 async def cb_select_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not query or not context.user_data:
+        return ConversationHandler.END
     await query.answer()
-    data = query.data
+    data = query.data or ""
 
     if data == "seltopic_custom":
         await _edit_bubble(
@@ -617,6 +646,8 @@ async def cb_select_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def recv_custom_topic_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _auto_delete_user_msg(update, context)
+    if not update.message or not update.message.text or not context.user_data:
+        return STATE_CUSTOM_TOPIC_NAME
     name = update.message.text.strip()
     if not name:
         return STATE_CUSTOM_TOPIC_NAME
@@ -632,6 +663,8 @@ async def recv_custom_topic_name(update: Update, context: ContextTypes.DEFAULT_T
 
 async def recv_custom_topic_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _auto_delete_user_msg(update, context)
+    if not update.message or not update.message.text or not context.user_data:
+        return ConversationHandler.END
     text = update.message.text.strip()
     name = context.user_data.pop("new_topic_name", "Topic")
     lines = [line.strip() for line in text.split("\n") if line.strip()]
@@ -661,6 +694,8 @@ async def recv_custom_topic_urls(update: Update, context: ContextTypes.DEFAULT_T
 async def _save_and_end(
     update: Update, context: ContextTypes.DEFAULT_TYPE, plan_id: int | None = None
 ):
+    if not update.effective_user or not context.user_data:
+        return ConversationHandler.END
     bot_user_id = update.effective_user.id
     api_id = context.user_data[_KEY_API_ID]
     api_hash = context.user_data[_KEY_API_HASH]
@@ -676,7 +711,7 @@ async def _save_and_end(
             phone=phone,
             session_string=session,
             topic_id=topic_id,
-            is_forward=False,
+            is_forward=True,
         )
         await _edit_bubble(context, AUTH_SUCCESS_MSG(phone), AUTH_SUCCESS_KEYBOARD())
     except Exception as exc:
@@ -715,41 +750,43 @@ async def cb_cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def build_add_user_conv() -> ConversationHandler:
     cancel_cb = CallbackQueryHandler(cb_cancel_button, pattern=r"^(cancel|cancel_.*|global_cancel)$")
+    states: dict[object, list[Any]] = {
+        STATE_API_ID: [
+            cancel_cb,
+            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_credentials),
+        ],
+        STATE_OTP: [
+            cancel_cb,
+            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_otp),
+            CallbackQueryHandler(cb_resend_otp, pattern=r"^resend_otp_code$"),
+        ],
+        STATE_2FA: [cancel_cb, MessageHandler(filters.TEXT & ~filters.COMMAND, recv_2fa)],
+        STATE_SELECT_TOPIC: [
+            cancel_cb,
+            CallbackQueryHandler(cb_select_topic, pattern=r"^seltopic:"),
+            CallbackQueryHandler(
+                cb_select_topic, pattern=r"^seltopic_(custom|skip)$"
+            ),
+        ],
+        STATE_CUSTOM_TOPIC_NAME: [
+            cancel_cb,
+            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_custom_topic_name),
+        ],
+        STATE_CUSTOM_TOPIC_URLS: [
+            cancel_cb,
+            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_custom_topic_urls),
+        ],
+    }
+    fallbacks: list[Any] = [
+        CommandHandler("cancel", cmd_cancel),
+        cancel_cb,
+    ]
     return ConversationHandler(
         entry_points=[
             CallbackQueryHandler(cb_add_user, pattern=r"^add_user$"),
             CallbackQueryHandler(cb_reauth_start, pattern=r"^u_reauth:\d+$"),
         ],
-        states={
-            STATE_API_ID: [
-                cancel_cb,
-                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_credentials),
-            ],
-            STATE_OTP: [
-                cancel_cb,
-                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_otp),
-                CallbackQueryHandler(cb_resend_otp, pattern=r"^resend_otp_code$"),
-            ],
-            STATE_2FA: [cancel_cb, MessageHandler(filters.TEXT & ~filters.COMMAND, recv_2fa)],
-            STATE_SELECT_TOPIC: [
-                cancel_cb,
-                CallbackQueryHandler(cb_select_topic, pattern=r"^seltopic:"),
-                CallbackQueryHandler(
-                    cb_select_topic, pattern=r"^seltopic_(custom|skip)$"
-                ),
-            ],
-            STATE_CUSTOM_TOPIC_NAME: [
-                cancel_cb,
-                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_custom_topic_name),
-            ],
-            STATE_CUSTOM_TOPIC_URLS: [
-                cancel_cb,
-                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_custom_topic_urls),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cmd_cancel),
-            cancel_cb,
-        ],
+        states=states,
+        fallbacks=fallbacks,
         allow_reentry=True,
     )

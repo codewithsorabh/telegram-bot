@@ -141,8 +141,11 @@ class ForwardingScheduler:
                 self._stop_worker(uid)
                 continue
 
-            # Check forwarding enabled
-            if not user.get("forwarding_enabled", True):
+            # Check forwarding enabled (only stopped if explicitly toggled False)
+            fwd_val = user.get("forwarding_enabled")
+            if fwd_val is None:
+                fwd_val = user.get("is_forward")
+            if fwd_val is not None and not fwd_val:
                 self._stop_worker(uid)
                 continue
 

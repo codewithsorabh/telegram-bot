@@ -65,9 +65,11 @@ def VIEW_USERS_LIST_KEYBOARD(
     rows = []
 
     for u in paged_users:
-        status_flag = (
-            "▶" if u.get("forwarding_enabled", u.get("is_forward", True)) else "⏸"
-        )
+        fwd_val = u.get("forwarding_enabled")
+        if fwd_val is None:
+            fwd_val = u.get("is_forward")
+        is_running = True if fwd_val is None else bool(fwd_val)
+        status_flag = "▶" if is_running else "⏸"
         phone = u.get("phone_number") or u.get("phone", "Unknown")
         if view_mode == "expired":
             label = f"{phone} (Expired)"
@@ -127,7 +129,10 @@ def USER_DETAIL_KEYBOARD(u: dict, view_mode: str = "all", page: int = 1) -> Inli
 
     back_callback = f"view_users_{clean_mode}:page:{page}" if page > 1 else f"view_users_{clean_mode}"
 
-    is_fwd = u.get("forwarding_enabled", u.get("is_forward", True))
+    fwd_val = u.get("forwarding_enabled")
+    if fwd_val is None:
+        fwd_val = u.get("is_forward")
+    is_fwd = True if fwd_val is None else bool(fwd_val)
     fwd_btn_label = "⏸️ Stop Forwarding" if is_fwd else "▶️ Start Forwarding"
     fwd_toggle_data = (
         f"u_toggle_fwd:{uid}:0:{clean_mode}:{page}"
