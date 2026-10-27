@@ -8,7 +8,7 @@
 #    • Bootstrap database tables & migrations
 #    • Run Telegram UI Bot (ApplicationBuilder)
 #    • Manage Userbot accounts (add via Telethon OTP/2FA, view, delete)
-#    • Manage Topics, Destination channels, Delays, and Plans
+#    • Manage Topics, Destination channels, and Forwarding
 #    • Manage Admin Settings & permissions
 #    • Broadcast signals to Userbot workers via Redis
 # ─────────────────────────────────────────────────────────────────────────────

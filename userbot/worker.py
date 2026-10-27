@@ -14,6 +14,7 @@
 
 import asyncio
 from datetime import datetime, timezone, timedelta
+import random
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -64,9 +65,10 @@ class AccountWorker:
                         └─ asyncio.Task: _run_loop()
                                 ├─ Fetch latest message from source channel
                                 ├─ Enqueue target URL tasks into WorkerQueue
-                                ├─ Process items sequentially: _forward_to()
-                                │     └─ client.forward_messages(entity, messages)
-                                ├─ Schedule next run: interval_seconds + 5s
+                                ├─ Process items sequentially (1-by-1): _forward_to()
+                                │     ├─ client.forward_messages(entity, messages)
+                                │     └─ Random sleep delay: 60-90s between URLs
+                                ├─ Schedule next run: 60-90s random delay (or interval_seconds)
                                 └─ FloodWait isolation: pause only affected worker
     """
 
@@ -306,10 +308,20 @@ class AccountWorker:
         topic_id = item["topic_id"]
         interval = item.get("interval_seconds", 60)
         url_key = item.get("url_key", "")
+        dest_url = dest.get("url") or dest.get("normalized") or dest.get("raw", "")
 
-        await self._forward_to(source_url, msg_id, dest, topic_id, url_key)
-        if interval > 0:
-            await asyncio.sleep(min(interval, 5))  # Smooth throttle
+        forwarded = await self._forward_to(source_url, msg_id, dest, topic_id, url_key)
+        if forwarded:
+            # 1 by 1 URL message forwarding random sleep delay (60-90 seconds)
+            sleep_delay = random.randint(60, 90)
+            LOG.info(
+                "⏳ [%s] 1-by-1 URL forward sleep: waiting %ds (random 60-90s) before next URL...",
+                self.uid,
+                sleep_delay,
+            )
+            await asyncio.sleep(sleep_delay)
+        else:
+            await asyncio.sleep(0.5)
 
     async def _get_latest_message_id(self, source_url: str) -> int | None:
         """Get the ID of the most recent message in the source channel using GetHistoryRequest."""
@@ -395,11 +407,11 @@ class AccountWorker:
                         format_duration(remaining_secs),
                     )
                     # asyncio.create_task(log_skipping(ch_id, self.uid, dest_url, next_run_str, remaining_secs))
-                    return
+                    return False
 
         if not self._client:
             LOG.error("❌ Worker user_id=%s — client not connected", self.uid)
-            return
+            return False
 
         dest_entity = None
         reply_to_topic = None
@@ -441,8 +453,10 @@ class AccountWorker:
                 )
 
                 sent_time = datetime.now(timezone.utc)
-                # Next run schedule: interval_seconds + 5 seconds buffer
-                next_run_time = sent_time + timedelta(seconds=interval + 5)
+                # Next run schedule: 60-90s random delay (or configured interval if larger)
+                delay_secs = random.randint(60, 90)
+                effective_interval = max(interval, delay_secs)
+                next_run_time = sent_time + timedelta(seconds=effective_interval)
                 next_run_str = format_ist_time(next_run_time)
 
                 LOG.info(
@@ -467,7 +481,7 @@ class AccountWorker:
                 asyncio.create_task(
                     log_success(ch_id, self.uid, dest_url, msg_id, next_run_str)
                 )
-                return
+                return True
 
             except FloodWaitError:
                 LOG.warning("🌊 [%s] FloodWait encountered on %s", self.uid, dest_url)
@@ -589,7 +603,9 @@ class AccountWorker:
                                 reply_to=open_topic_id,
                             )
                             sent_time = datetime.now(timezone.utc)
-                            next_run_time = sent_time + timedelta(seconds=interval + 5)
+                            delay_secs = random.randint(60, 90)
+                            effective_interval = max(interval, delay_secs)
+                            next_run_time = sent_time + timedelta(seconds=effective_interval)
                             LOG.info(
                                 "✅ [%s] Forwarded msg_id=%s → %s (topic_id=%s fallback) SUCCESSFULLY",
                                 self.uid,
@@ -612,7 +628,7 @@ class AccountWorker:
                             asyncio.create_task(
                                 log_topic_fallback(ch_id, self.uid, dest_url, open_topic_id)
                             )
-                            return
+                            return True
                         except Exception as fallback_exc:
                             exc = fallback_exc
 
@@ -637,6 +653,8 @@ class AccountWorker:
                         failure_count=attempt,
                     )
                     asyncio.create_task(log_failed(ch_id, self.uid, dest_url, str(exc)))
+                    return False
+        return False
 
     # ──────────────────────────────────────────
     #  Telethon client helpers

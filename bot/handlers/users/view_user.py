@@ -37,13 +37,10 @@ from models.users import (
     get_banned_users,
     update_user_forwarding,
     update_user_topic,
-    update_user_plan,
-    upgrade_user_plan,
     update_user_channel_id,
     delete_telegram_user,
 )
 from models.topics import get_all_topics, get_topic_keys_summary
-from models.plans import get_all_plans
 from utils.auto_delete import schedule_delete
 from templates.messages import (
     WELCOME_MSG,

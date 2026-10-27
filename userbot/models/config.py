@@ -338,7 +338,7 @@ def get_all_admins() -> list[dict]:
         perms = (
             r[2]
             if r[2]
-            else {"manage_users": True, "manage_topics": True, "manage_plans": True}
+            else {"manage_users": True, "manage_topics": True}
         )
         name = r[3] if r[3] else f"{aid}"
         if isinstance(perms, str):

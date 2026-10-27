@@ -134,12 +134,6 @@ class ForwardingScheduler:
 
             uid = user["id"]
 
-            # Check plan expiry
-            expired_at = user.get("plan_expired_at")
-            if expired_at and expired_at < datetime.now(timezone.utc):
-                LOG.debug("Scheduler: user_id=%s plan expired — skipping", uid)
-                self._stop_worker(uid)
-                continue
 
             # Check forwarding enabled (only stopped if explicitly toggled False)
             fwd_val = user.get("forwarding_enabled")

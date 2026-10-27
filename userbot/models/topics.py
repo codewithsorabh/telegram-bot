@@ -11,7 +11,7 @@
 #    source_url       TEXT         NOT NULL  (source Telegram channel to read FROM)
 #    url              TEXT         NOT NULL  (destination Telegram link to forward TO)
 #    enabled          BOOLEAN      NOT NULL DEFAULT TRUE
-#    interval_seconds INTEGER      NOT NULL DEFAULT 60
+#    interval_seconds INTEGER      NOT NULL DEFAULT 60   (1-by-1 URL forwards use 60-90s random sleep delay)
 #    priority         INTEGER      NOT NULL DEFAULT 0
 #    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 #    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()

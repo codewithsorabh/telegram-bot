@@ -48,7 +48,7 @@ def bootstrap_users_table() -> None:
             session_string       TEXT         NOT NULL,
             topic_id             VARCHAR(100),
             channel_id           VARCHAR(100),
-            plan_id              BIGINT       REFERENCES plans(id) ON DELETE SET NULL,
+            plan_id              BIGINT,
             plan_started_at      TIMESTAMPTZ,
             plan_expired_at      TIMESTAMPTZ,
             forwarding_enabled   BOOLEAN      NOT NULL DEFAULT TRUE,
@@ -64,7 +64,7 @@ def bootstrap_users_table() -> None:
             ADD COLUMN IF NOT EXISTS phone_number         VARCHAR(20),
             ADD COLUMN IF NOT EXISTS topic_id             VARCHAR(100),
             ADD COLUMN IF NOT EXISTS channel_id           VARCHAR(100),
-            ADD COLUMN IF NOT EXISTS plan_id              BIGINT       REFERENCES plans(id) ON DELETE SET NULL,
+            ADD COLUMN IF NOT EXISTS plan_id              BIGINT,
             ADD COLUMN IF NOT EXISTS plan_started_at      TIMESTAMPTZ,
             ADD COLUMN IF NOT EXISTS plan_expired_at      TIMESTAMPTZ,
             ADD COLUMN IF NOT EXISTS forwarding_enabled   BOOLEAN      NOT NULL DEFAULT TRUE,
@@ -76,6 +76,19 @@ def bootstrap_users_table() -> None:
             ALTER COLUMN channel_id TYPE VARCHAR(100) USING channel_id::VARCHAR;
         ALTER TABLE telegram_users
             ALTER COLUMN plan_started_at DROP NOT NULL;
+    """)
+
+    # Drop any leftover foreign key constraint to plans if it exists
+    cursor.execute("""
+        DO $$ BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE constraint_name = 'telegram_users_plan_id_fkey'
+                  AND table_name = 'telegram_users'
+            ) THEN
+                ALTER TABLE telegram_users DROP CONSTRAINT telegram_users_plan_id_fkey;
+            END IF;
+        END $$;
     """)
 
     # Rename/fix old phone column if it exists
@@ -146,11 +159,9 @@ def bootstrap_users_table() -> None:
 # ─────────────────────────────────────────────
 #  Internal helpers
 # ─────────────────────────────────────────────
-def _compute_expired_at(plan_id: int | None, started_at_expr: str = "NOW()") -> str:
-    """Returns a SQL expression for plan_expired_at based on plan validity."""
-    if plan_id is None:
-        return "NOW() + INTERVAL '7 days'"  # default trial
-    return f"(SELECT {started_at_expr} + (validity_days || ' days')::INTERVAL FROM plans WHERE id = {plan_id})"
+def _compute_expired_at(plan_id: int | None = None, started_at_expr: str = "NOW()") -> str:
+    """Returns a SQL expression for plan_expired_at (no plans: NULL)."""
+    return "NULL"
 
 
 def _row_to_dict(row: tuple) -> dict:
@@ -187,15 +198,14 @@ def _row_to_dict(row: tuple) -> dict:
 
 _SELECT = """
     SELECT u.id, u.user_id, u.api_id, u.api_hash, u.phone_number, u.session_string,
-           u.topic_id, t.name, u.plan_id, p.name,
-           p.validity_days, u.plan_started_at, u.plan_expired_at,
+           u.topic_id, t.name, u.plan_id, NULL AS plan_name,
+           NULL AS validity_days, u.plan_started_at, u.plan_expired_at,
            u.forwarding_enabled, u.created_at, u.updated_at, u.channel_id,
            COALESCE(u.session_status, 'active'), u.session_error, u.last_session_check_at
     FROM telegram_users u
     LEFT JOIN (
         SELECT DISTINCT ON (url_key) url_key, name FROM topics ORDER BY url_key
     ) t ON t.url_key = u.topic_id
-    LEFT JOIN plans  p ON p.id = u.plan_id
 """
 
 
@@ -244,10 +254,7 @@ def save_telegram_user(
             (user_id, added_by, api_id, api_hash, phone, phone_number, session_string,
              topic_id, plan_id, plan_started_at, plan_expired_at, forwarding_enabled, channel_id)
         VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            CASE WHEN %s::BIGINT IS NULL THEN NULL ELSE NOW() END,
-            CASE WHEN %s::BIGINT IS NULL THEN NULL ELSE NOW() + ((SELECT validity_days FROM plans WHERE id = %s::BIGINT) || ' days')::INTERVAL END,
-            %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, %s, %s
         )
         ON CONFLICT (phone_number) DO UPDATE
             SET api_id               = EXCLUDED.api_id,
@@ -258,9 +265,9 @@ def save_telegram_user(
                 user_id              = EXCLUDED.user_id,
                 added_by             = EXCLUDED.added_by,
                 topic_id             = EXCLUDED.topic_id,
-                plan_id              = EXCLUDED.plan_id,
-                plan_started_at      = CASE WHEN EXCLUDED.plan_id IS NULL THEN NULL ELSE COALESCE(telegram_users.plan_started_at, NOW()) END,
-                plan_expired_at      = CASE WHEN EXCLUDED.plan_id IS NULL THEN NULL ELSE NOW() + ((SELECT validity_days FROM plans WHERE id = EXCLUDED.plan_id) || ' days')::INTERVAL END,
+                plan_id              = NULL,
+                plan_started_at      = NULL,
+                plan_expired_at      = NULL,
                 forwarding_enabled   = COALESCE(telegram_users.forwarding_enabled, EXCLUDED.forwarding_enabled),
                 channel_id           = COALESCE(EXCLUDED.channel_id, telegram_users.channel_id),
                 updated_at           = NOW();
@@ -274,10 +281,6 @@ def save_telegram_user(
             phone,
             enc_session,
             topic_id,
-            plan_id,
-            plan_id,
-            plan_id,
-            plan_id,
             is_forward,
             ch_id,
         ),
@@ -303,11 +306,10 @@ def get_all_users() -> list[dict]:
 
 
 def get_active_users() -> list[dict]:
-    """Return users whose plan has not expired and forwarding is enabled with a valid session string."""
+    """Return users where forwarding is enabled with a valid session string."""
     cursor = get_cursor()
     cursor.execute(_SELECT + """
         WHERE u.forwarding_enabled = TRUE
-          AND (u.plan_expired_at IS NULL OR u.plan_expired_at > NOW())
           AND u.session_string IS NOT NULL
           AND length(u.session_string) > 50
         ORDER BY u.id;
@@ -391,58 +393,13 @@ def update_user_topic(user_id: int, topic_id: str | int | None) -> dict | None:
     return get_user_by_id(user_id)
 
 
-def upgrade_user_plan(user_id: int, plan_id: int | None) -> dict | None:
-    """Upgrade: switch plan_id but keep original plan_started_at."""
-    cursor = get_cursor()
-    if plan_id is None:
-        cursor.execute(
-            "UPDATE telegram_users SET plan_id = NULL, plan_expired_at = NULL, updated_at = NOW() WHERE id = %s;",
-            (user_id,),
-        )
-    else:
-        cursor.execute(
-            """
-            UPDATE telegram_users
-            SET plan_id = %s,
-                plan_expired_at = plan_started_at + (
-                    COALESCE((SELECT validity_days FROM plans WHERE id = %s), 30) || ' days'
-                )::INTERVAL,
-                updated_at = NOW()
-            WHERE id = %s;
-        """,
-            (plan_id, plan_id, user_id),
-        )
-    db.commit()
-    cursor.close()
-    LOG.info("Upgraded plan_id=%s for user_id=%s", plan_id, user_id)
+def upgrade_user_plan(user_id: int, plan_id: int | None = None) -> dict | None:
+    """Stub: plans system removed."""
     return get_user_by_id(user_id)
 
 
-def update_user_plan(user_id: int, plan_id: int | None) -> dict | None:
-    """Update: switch plan_id AND reset plan_started_at to NOW()."""
-    cursor = get_cursor()
-    if plan_id is None:
-        cursor.execute(
-            "UPDATE telegram_users SET plan_id = NULL, plan_started_at = NOW(), plan_expired_at = NULL, updated_at = NOW() WHERE id = %s;",
-            (user_id,),
-        )
-    else:
-        cursor.execute(
-            """
-            UPDATE telegram_users
-            SET plan_id = %s,
-                plan_started_at = NOW(),
-                plan_expired_at = NOW() + (
-                    COALESCE((SELECT validity_days FROM plans WHERE id = %s), 30) || ' days'
-                )::INTERVAL,
-                updated_at = NOW()
-            WHERE id = %s;
-        """,
-            (plan_id, plan_id, user_id),
-        )
-    db.commit()
-    cursor.close()
-    LOG.info("Updated plan_id=%s for user_id=%s", plan_id, user_id)
+def update_user_plan(user_id: int, plan_id: int | None = None) -> dict | None:
+    """Stub: plans system removed."""
     return get_user_by_id(user_id)
 
 

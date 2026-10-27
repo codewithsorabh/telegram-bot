@@ -11,7 +11,7 @@ def WELCOME_MSG(user):
     return (
         f"👋 <b>Hello, {name}!</b>\n\n"
         "🤖 <b>Welcome to AI Bot Control Center</b>\n\n"
-        "Manage users, topics, plans, and system settings below 👇\n\n"
+        "Manage users, topics, and system settings below 👇\n\n"
         "⚙️ <b>Use the buttons below to manage the system.</b>"
     )
 

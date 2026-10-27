@@ -47,7 +47,6 @@ from telegram.ext import (
 
 from models.users import save_telegram_user
 from models.topics import get_all_topics
-from models.plans import get_all_plans, create_plan
 from utils.auto_delete import schedule_delete
 from templates.messages import (
     ASK_AUTH,
